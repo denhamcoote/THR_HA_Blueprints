@@ -2,7 +2,7 @@
 blueprint:
   name: Moes / Tuya Scene Switch (Multi-press)
   description: |
-    # Moes / Tuya Scene Switch - Multi-press Controller v0.1
+    # Moes / Tuya Scene Switch - Multi-press Controller v0.123
   domain: automation
   input:
     controller_device:
