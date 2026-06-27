@@ -1,0 +1,131 @@
+blueprint:
+  name: "Sonoff Orb-ZBW1 Edge-to-Virtual Scene Controller Translator"
+  description: "Converts double-edge physical momentary toggle events into 1_single, 1_double, 1_hold, and 1_release virtual MQTT scene states."
+  domain: automation
+  input:
+    source_topic:
+      name: Source MQTT Topic
+      description: "The full raw MQTT sub-topic to listen to (e.g., zigbee2mqtt/053 [Ofiice] - Wired 1-gang switch (zigbee)/action)."
+      default: ""
+    target_topic:
+      name: Target Virtual MQTT Topic
+      description: "The virtual sub-topic where the scene codes will be published (e.g., zigbee2mqtt/virtual_office_switch/action)."
+      default: ""
+    hold_timeout:
+      name: Hold Threshold Time
+      description: "How long you must hold the button down to trigger a '1_hold' event."
+      default: 0.400
+      selector:
+        number:
+          min: 0.150
+          max: 1.000
+          step: 0.050
+          unit_of_measurement: seconds
+          mode: slider
+    double_timeout:
+      name: Double-Click Window
+      description: "The maximum allowed pause between clicks to register a '1_double'."
+      default: 0.250
+      selector:
+        number:
+          min: 0.100
+          max: 0.600
+          step: 0.050
+          unit_of_measurement: seconds
+          mode: slider
+
+# Pass blueprint variables into internal script context fields
+variables:
+  source_topic_var: !input source_topic
+  target_topic_var: !input target_topic
+  hold_timeout_var: !input hold_timeout
+  double_timeout_var: !input double_timeout
+
+mode: single
+max: 10
+max_exceeded: silent
+
+trigger:
+  - platform: mqtt
+    topic: !input source_topic
+    payload: toggle
+
+action:
+  # =======================================================================
+  # STEP 1: MEASURE PHYSICAL HOLD VS INITIAL RELEASE
+  # =======================================================================
+  - wait_for_trigger:
+      - platform: mqtt
+        topic: !input source_topic
+        payload: toggle
+    timeout: "{{ hold_timeout_var }}"
+    continue_on_timeout: true
+
+  - choose:
+      # PATH A: TIMEOUT REACHED -> Physical hold detected
+      - conditions:
+          - condition: template
+            value_template: "{{ wait.trigger is none }}"
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: "{{ target_topic_var }}"
+              payload: 1_hold
+          
+          # Wait indefinitely for the physical spring-up release
+          - wait_for_trigger:
+              - platform: mqtt
+                topic: !input source_topic
+                payload: toggle
+          
+          - action: mqtt.publish
+            data:
+              topic: "{{ target_topic_var }}"
+              payload: 1_release
+
+      # PATH B: TOGGLE RECEIVED -> Physical button released (Single/Double candidate)
+      - conditions:
+          - condition: template
+            value_template: "{{ wait.trigger is not none }}"
+        sequence:
+          # Wait briefly to see if a SECOND click sequence begins
+          - wait_for_trigger:
+              - platform: mqtt
+                topic: !input source_topic
+                payload: toggle
+            timeout: "{{ double_timeout_var }}"
+            continue_on_timeout: true
+
+          - choose:
+              # PATH B1: TIMEOUT REACHED -> No second click.
+              - conditions:
+                  - condition: template
+                    value_template: "{{ wait.trigger is none }}"
+                sequence:
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ target_topic_var }}"
+                      payload: 1_single
+
+              # PATH B2: TOGGLE RECEIVED -> User initiated second click
+              - conditions:
+                  - condition: template
+                    value_template: "{{ wait.trigger is not none }}"
+                sequence:
+                  # Wait for physical release of second click
+                  - wait_for_trigger:
+                      - platform: mqtt
+                        topic: !input source_topic
+                        payload: toggle
+                    timeout: "{{ hold_timeout_var }}"
+                    continue_on_timeout: true
+                  
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ target_topic_var }}"
+                      payload: 1_double
+
+  # =======================================================================
+  # STEP 2: TRAILING PAYLOAD ABSORPTION SHIELD
+  # =======================================================================
+  - delay: "00:00:00.100"
